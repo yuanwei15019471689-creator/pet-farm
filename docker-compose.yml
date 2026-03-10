@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    container_name: farm-helper
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DB_PATH=/app/data/farm.db
+    restart: unless-stopped

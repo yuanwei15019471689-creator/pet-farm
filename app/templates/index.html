@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>梦幻西游 · 牧场助手</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+
+    .card-enter { animation: cardIn .35s ease both; }
+    @keyframes cardIn {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .satiety-bar { transition: width .6s cubic-bezier(.4,0,.2,1); }
+
+    .stage-juvenile { background: #3b82f6; }
+    .stage-adult    { background: #10b981; }
+    .stage-extra    { background: #8b5cf6; }
+    .stage-expired  { background: #9ca3af; }
+
+    .glow-green { box-shadow: 0 0 0 3px rgba(16,185,129,.35); }
+    .glow-blue  { box-shadow: 0 0 0 3px rgba(59,130,246,.35); }
+    .glow-red   { box-shadow: 0 0 0 3px rgba(239,68,68,.35); }
+
+    /* 自定义滚动条 */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-slate-100 to-green-50 min-h-screen font-sans"
+      x-data="farmApp()" x-init="init()">
+
+<!-- ══════════════════ 顶栏 ══════════════════ -->
+<header class="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-slate-200 shadow-sm">
+  <div class="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <span class="text-2xl">🌿</span>
+      <span class="font-bold text-slate-700 text-lg tracking-tight">梦幻西游 · 牧场助手</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-sm text-slate-500" x-text="todayStr"></span>
+      <button @click="showAddModal = true"
+              class="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600 active:scale-95
+                     text-white text-sm font-medium px-4 py-1.5 rounded-full shadow transition-all">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
+        </svg>
+        养育
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════════ 今日摘要横条 ══════════════════ -->
+<div class="max-w-6xl mx-auto px-4 mt-5" x-cloak x-show="summary">
+  <div class="rounded-2xl p-4 flex flex-wrap gap-4 items-center"
+       :class="summary?.need_feed_count > 0 ? 'bg-amber-50 border border-amber-200' : 'bg-emerald-50 border border-emerald-200'">
+    <!-- 图标 -->
+    <div class="text-3xl" x-text="summary?.need_feed_count > 0 ? '🔔' : '✅'"></div>
+    <div class="flex-1 min-w-0">
+      <template x-if="summary?.need_feed_count > 0">
+        <div>
+          <p class="font-semibold text-amber-800">
+            今日有 <span class="text-amber-600 text-xl font-bold" x-text="summary.need_feed_count"></span>
+            只动物需要喂饲料
+          </p>
+          <p class="text-sm text-amber-700 mt-0.5">
+            <span x-text="summary.need_feed_names.join('、')"></span>
+          </p>
+        </div>
+      </template>
+      <template x-if="summary?.need_feed_count === 0">
+        <p class="font-semibold text-emerald-700">今日所有动物均已喂养完毕，无需额外操作 🎉</p>
+      </template>
+    </div>
+    <!-- 今日产出 -->
+    <template x-if="summary?.has_output?.length > 0">
+      <div class="bg-white/70 rounded-xl px-4 py-2 border border-slate-200">
+        <p class="text-xs text-slate-500 mb-1 font-medium">今日产出</p>
+        <template x-for="item in summary.has_output" :key="item.nickname">
+          <p class="text-sm font-semibold text-indigo-700">
+            <span x-text="item.nickname"></span>
+            <span class="text-slate-400 font-normal"> × </span>
+            <span x-text="item.output"></span>
+          </p>
+        </template>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- ══════════════════ 动物列表 ══════════════════ -->
+<main class="max-w-6xl mx-auto px-4 py-6">
+
+  <!-- 空状态 -->
+  <template x-if="!loading && animals.length === 0">
+    <div class="flex flex-col items-center justify-center py-24 text-slate-400">
+      <div class="text-6xl mb-4">🐾</div>
+      <p class="text-xl font-semibold mb-2">牧场空空如也</p>
+      <p class="text-sm mb-6">点击右上角「新增动物」开始养殖吧</p>
+      <button @click="showAddModal = true"
+              class="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-full text-sm font-medium transition">
+        开始养育
+      </button>
+    </div>
+  </template>
+
+  <!-- 加载中 -->
+  <template x-if="loading">
+    <div class="flex justify-center py-24">
+      <div class="w-10 h-10 border-4 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
+    </div>
+  </template>
+
+  <!-- 筛选栏 -->
+  <div x-show="animals.length > 0"
+       class="flex flex-wrap items-center gap-3 mb-4">
+    <!-- 动物种类 -->
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-slate-500 whitespace-nowrap">动物种类</label>
+      <select x-model="filter.species"
+              class="border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700
+                     bg-white outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition">
+        <option value="">全部</option>
+        <template x-for="sp in speciesList" :key="sp.key">
+          <option :value="sp.key" x-text="sp.emoji + ' ' + sp.name"></option>
+        </template>
+      </select>
+    </div>
+    <!-- 是否需要喂养 -->
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-slate-500 whitespace-nowrap">喂养状态</label>
+      <select x-model="filter.feedStatus"
+              class="border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-700
+                     bg-white outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition">
+        <option value="">全部</option>
+        <option value="need">今日需喂养</option>
+        <option value="done">今日已喂养</option>
+        <option value="none">今日无需喂养</option>
+      </select>
+    </div>
+    <!-- 重置 -->
+    <button x-show="filter.species || filter.feedStatus"
+            @click="filter.species = ''; filter.feedStatus = ''"
+            class="text-xs text-slate-400 hover:text-slate-600 underline transition">
+      重置筛选
+    </button>
+    <!-- 筛选结果数 -->
+    <span class="ml-auto text-xs text-slate-400">
+      共 <strong class="text-slate-600" x-text="filteredAnimals.length"></strong> 条
+    </span>
+  </div>
+
+  <!-- 列表表格 -->
+  <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+
+    <!-- 表头 -->
+    <div class="hidden md:grid grid-cols-[2fr_1fr_1fr_1.6fr_2fr_auto] gap-4 px-5 py-3
+                bg-slate-50 border-b border-slate-100 text-xs font-semibold text-slate-400 uppercase tracking-wide">
+      <span>动物</span>
+      <span class="text-center">天数</span>
+      <span class="text-center">阶段</span>
+      <span>饱食度</span>
+      <span>今日喂养</span>
+      <span class="text-center">操作</span>
+    </div>
+
+    <!-- 数据行 -->
+    <template x-for="(animal, idx) in filteredAnimals" :key="animal.id">
+      <div class="card-enter grid grid-cols-1 md:grid-cols-[2fr_1fr_1fr_1.6fr_2fr_auto] gap-4
+                  items-center px-5 py-3.5 transition-colors hover:bg-slate-50/60"
+           :class="{
+             'border-t border-slate-100': idx > 0,
+             'opacity-55': !animal.is_alive
+           }">
+
+        <!-- 动物名称列 -->
+        <div class="flex items-center gap-3 min-w-0">
+          <!-- 左侧阶段色条 -->
+          <div class="w-1 self-stretch rounded-full flex-shrink-0"
+               :class="{
+                 'stage-juvenile': animal.stage === '幼年期',
+                 'stage-adult':    animal.stage === '成年期',
+                 'stage-extra':    animal.stage === '额外寿命',
+                 'stage-expired':  !animal.is_alive
+               }"></div>
+          <span class="text-xl flex-shrink-0" x-text="animal.emoji"></span>
+          <div class="min-w-0">
+            <p class="font-semibold text-slate-800 text-sm truncate" x-text="animal.nickname"></p>
+            <p class="text-xs text-slate-400 truncate">
+              <span x-text="animal.species_name"></span>
+              <span class="text-slate-300 mx-1">·</span>
+              <span x-text="animal.start_date"></span>
+            </p>
+          </div>
+        </div>
+
+        <!-- 天数列 -->
+        <div class="flex items-center justify-center md:justify-center gap-1">
+          <span class="font-bold text-slate-700 text-base" x-text="animal.is_alive ? animal.day : '-'"></span>
+          <span class="text-xs text-slate-400" x-show="animal.is_alive">
+            / <span x-text="animal.total_days"></span>
+          </span>
+          <!-- 移动端标签 -->
+          <span class="md:hidden text-xs text-slate-400 ml-1">天</span>
+        </div>
+
+        <!-- 阶段列 -->
+        <div class="flex justify-center">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                :class="{
+                  'bg-blue-100 text-blue-700':    animal.stage === '幼年期',
+                  'bg-emerald-100 text-emerald-700': animal.stage === '成年期',
+                  'bg-purple-100 text-purple-700': animal.stage === '额外寿命',
+                  'bg-slate-100 text-slate-500':  !animal.is_alive
+                }"
+                x-text="animal.stage"></span>
+        </div>
+
+        <!-- 饱食度列 -->
+        <div class="flex items-center gap-2">
+          <div class="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div class="h-full rounded-full satiety-bar"
+                 :class="animal.satiety >= 90 ? 'bg-emerald-400' : animal.satiety >= 80 ? 'bg-amber-400' : 'bg-red-400'"
+                 :style="'width:' + animal.satiety + '%'"></div>
+          </div>
+          <span class="text-xs font-semibold w-12 text-right flex-shrink-0"
+                :class="animal.satiety >= 90 ? 'text-emerald-600' : animal.satiety >= 80 ? 'text-amber-500' : 'text-red-500'"
+                x-text="animal.satiety + '/100'"></span>
+        </div>
+
+        <!-- 今日喂养列 -->
+        <div>
+          <!-- 在世且需要喂 · 未喂 -->
+          <template x-if="animal.is_alive && animal.feed_needed > 0 && !animal.fed_today">
+            <div class="flex items-center gap-2">
+              <span class="text-sm">🌾</span>
+              <span class="text-xs text-amber-700 font-medium">
+                需喂 <strong x-text="animal.feed_needed"></strong> 饲料
+              </span>
+              <button @click="feedAnimal(animal)"
+                      :disabled="animal._feeding"
+                      class="ml-auto bg-amber-500 hover:bg-amber-600 active:scale-95 disabled:opacity-50
+                             text-white text-xs font-semibold px-2.5 py-1 rounded-lg transition-all flex-shrink-0">
+                <span x-show="!animal._feeding">喂养</span>
+                <span x-show="animal._feeding">…</span>
+              </button>
+            </div>
+          </template>
+
+          <!-- 在世且需要喂 · 已喂 -->
+          <template x-if="animal.is_alive && animal.feed_needed > 0 && animal.fed_today">
+            <div class="flex items-center gap-2">
+              <span class="text-sm">✅</span>
+              <span class="text-xs text-emerald-700 font-medium">
+                已喂 <strong x-text="animal.fed_amount"></strong> 饲料
+              </span>
+            </div>
+          </template>
+
+          <!-- 今日无需喂 -->
+          <template x-if="animal.is_alive && animal.feed_needed === 0">
+            <div class="flex items-center gap-2">
+              <span class="text-sm">💤</span>
+              <span class="text-xs text-slate-400">无需喂养</span>
+              <template x-if="animal.output_today > 0">
+                <span class="ml-auto text-xs font-semibold text-indigo-600 flex-shrink-0">
+                  产出 <span x-text="animal.output_today"></span>
+                </span>
+              </template>
+            </div>
+          </template>
+
+          <!-- 已到期 -->
+          <template x-if="!animal.is_alive">
+            <div class="flex items-center gap-2">
+              <span class="text-sm">🏁</span>
+              <span class="text-xs text-slate-400">养殖周期已结束</span>
+            </div>
+          </template>
+        </div>
+
+        <!-- 操作列 -->
+        <div class="flex items-center justify-end gap-1">
+          <button @click="confirmSell(animal)"
+                  class="flex flex-col items-center gap-0.5 text-slate-300 hover:text-amber-500 transition p-1.5 rounded-lg hover:bg-amber-50">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span class="text-[10px] leading-none">售出</span>
+          </button>
+        </div>
+
+      </div>
+    </template>
+
+    <!-- 筛选无结果 -->
+    <template x-if="!loading && animals.length > 0 && filteredAnimals.length === 0">
+      <div class="px-5 py-10 text-center text-slate-400 text-sm">
+        暂无符合条件的动物
+      </div>
+    </template>
+
+    <!-- 底部统计行 -->
+    <template x-if="filteredAnimals.length > 0">
+      <div class="border-t border-slate-100 px-5 py-2.5 bg-slate-50/50 flex items-center gap-4 text-xs text-slate-400">
+        <span>共 <strong class="text-slate-600" x-text="filteredAnimals.length"></strong> 只</span>
+        <span>今日需喂 <strong class="text-amber-600"
+              x-text="filteredAnimals.filter(a => a.is_alive && a.feed_needed > 0 && !a.fed_today).length"></strong> 只</span>
+        <span>今日产出
+          <strong class="text-indigo-600"
+                  x-text="filteredAnimals.reduce((s,a) => s + (a.output_today || 0), 0) || '—'"></strong>
+        </span>
+      </div>
+    </template>
+  </div>
+</main>
+
+<!-- ══════════════════ 新增动物弹窗 ══════════════════ -->
+<div x-cloak x-show="showAddModal"
+     x-transition:enter="transition ease-out duration-200"
+     x-transition:enter-start="opacity-0"
+     x-transition:enter-end="opacity-100"
+     x-transition:leave="transition ease-in duration-150"
+     x-transition:leave-start="opacity-100"
+     x-transition:leave-end="opacity-0"
+     @keydown.escape.window="showAddModal = false"
+     class="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+
+  <div @click.stop
+       x-transition:enter="transition ease-out duration-200"
+       x-transition:enter-start="opacity-0 scale-95"
+       x-transition:enter-end="opacity-100 scale-100"
+       class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+
+    <!-- 弹窗头 -->
+    <div class="bg-gradient-to-r from-emerald-500 to-teal-500 px-6 py-5 flex items-center justify-between">
+      <div>
+        <h2 class="text-white font-bold text-lg">新增养殖动物</h2>
+        <p class="text-emerald-100 text-xs mt-0.5">填写信息后点击确认添加</p>
+      </div>
+      <button @click="showAddModal = false"
+              class="text-white/70 hover:text-white transition p-1">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 表单 -->
+    <form @submit.prevent="submitAdd()" class="px-6 py-5 space-y-5">
+
+      <!-- 选择物种 -->
+      <div>
+        <label class="block text-sm font-medium text-slate-600 mb-2">选择动物种类</label>
+        <div class="grid grid-cols-5 gap-2">
+          <template x-for="sp in speciesList" :key="sp.key">
+            <button type="button"
+                    @click="form.species = sp.key"
+                    :class="form.species === sp.key
+                      ? 'ring-2 ring-emerald-500 bg-emerald-50 border-emerald-300'
+                      : 'border-slate-200 bg-white hover:border-emerald-300 hover:bg-emerald-50'"
+                    class="flex flex-col items-center justify-center p-2.5 rounded-xl border transition-all text-center cursor-pointer">
+              <span class="text-2xl" x-text="sp.emoji"></span>
+              <span class="text-xs text-slate-600 mt-1 leading-tight" x-text="sp.name"></span>
+            </button>
+          </template>
+        </div>
+        <p class="text-xs text-red-500 mt-1" x-show="formError.species" x-text="formError.species"></p>
+      </div>
+
+      <!-- 昵称 -->
+      <div>
+        <label class="block text-sm font-medium text-slate-600 mb-1.5">
+          动物昵称
+          <span class="text-slate-400 font-normal text-xs ml-1">（选填，不填默认为「物种+日期」）</span>
+        </label>
+        <input type="text"
+               x-model="form.nickname"
+               maxlength="20"
+               :placeholder="form.species ? (speciesList.find(s=>s.key===form.species)?.name ?? '') + form.start_date.replace(/-/g,'') : '例如：小胖、阿宝'"
+               class="w-full border border-slate-300 rounded-xl px-4 py-2.5 text-sm text-slate-700 outline-none
+                      focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition" />
+      </div>
+
+      <!-- 开始日期 -->
+      <div>
+        <label class="block text-sm font-medium text-slate-600 mb-1.5">
+          养殖开始日期
+          <span class="text-slate-400 font-normal text-xs ml-1">（第1天）</span>
+        </label>
+        <input type="date"
+               x-model="form.start_date"
+               :class="formError.start_date ? 'border-red-400 ring-1 ring-red-300' : 'border-slate-300'"
+               class="w-full border rounded-xl px-4 py-2.5 text-sm text-slate-700 outline-none
+                      focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition" />
+        <p class="text-xs text-red-500 mt-1" x-show="formError.start_date" x-text="formError.start_date"></p>
+      </div>
+
+      <!-- 提交按钮 -->
+      <div class="flex gap-3 pt-1">
+        <button type="button"
+                @click="showAddModal = false"
+                class="flex-1 border border-slate-300 text-slate-600 font-medium py-2.5 rounded-xl
+                       hover:bg-slate-50 transition text-sm">
+          取消
+        </button>
+        <button type="submit"
+                :disabled="submitting"
+                class="flex-1 bg-emerald-500 hover:bg-emerald-600 active:scale-95 disabled:opacity-60
+                       text-white font-medium py-2.5 rounded-xl transition-all text-sm">
+          <span x-show="!submitting">✓ 确认添加</span>
+          <span x-show="submitting">添加中…</span>
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ══════════════════ 售出确认弹窗 ══════════════════ -->
+<div x-cloak x-show="sellTarget"
+     x-transition:enter="transition ease-out duration-150"
+     x-transition:enter-start="opacity-0"
+     x-transition:enter-end="opacity-100"
+     class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+  <div @click.stop
+       x-transition:enter="transition ease-out duration-150"
+       x-transition:enter-start="opacity-0 scale-95"
+       x-transition:enter-end="opacity-100 scale-100"
+       class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
+    <!-- 顶部金色渐变 -->
+    <div class="bg-gradient-to-r from-amber-400 to-yellow-400 px-6 py-4 text-center">
+      <div class="text-4xl mb-1" x-text="sellTarget?.emoji"></div>
+      <h3 class="font-bold text-white text-base">确认售出这只动物？</h3>
+    </div>
+    <div class="px-6 py-4">
+      <p class="text-slate-500 text-sm text-center mb-4">
+        「<span x-text="sellTarget?.nickname" class="font-semibold text-slate-700"></span>」
+        将标记为已售出，从列表中移除，记录保留在数据库中
+      </p>
+      <!-- 售出信息预览 -->
+      <div class="bg-amber-50 rounded-xl p-3 mb-4 text-sm space-y-1">
+        <div class="flex justify-between">
+          <span class="text-slate-500">物种</span>
+          <span class="font-medium text-slate-700" x-text="sellTarget?.species_name"></span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-slate-500">养殖天数</span>
+          <span class="font-medium text-slate-700">
+            第 <span x-text="sellTarget?.day"></span> 天 /
+            共 <span x-text="sellTarget?.total_days"></span> 天
+          </span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-slate-500">当前阶段</span>
+          <span class="font-medium text-slate-700" x-text="sellTarget?.stage"></span>
+        </div>
+      </div>
+      <div class="flex gap-3">
+        <button @click="sellTarget = null"
+                class="flex-1 border border-slate-300 text-slate-600 font-medium py-2 rounded-xl hover:bg-slate-50 transition text-sm">
+          取消
+        </button>
+        <button @click="doSell()"
+                class="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-medium py-2 rounded-xl transition text-sm">
+          💰 确认售出
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ 删除确认弹窗 ══════════════════ -->
+<div x-cloak x-show="deleteTarget"
+     x-transition:enter="transition ease-out duration-150"
+     x-transition:enter-start="opacity-0"
+     x-transition:enter-end="opacity-100"
+     class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+  <div @click.stop
+       x-transition:enter="transition ease-out duration-150"
+       x-transition:enter-start="opacity-0 scale-95"
+       x-transition:enter-end="opacity-100 scale-100"
+       class="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+    <div class="text-center mb-5">
+      <div class="text-4xl mb-3" x-text="deleteTarget?.emoji"></div>
+      <h3 class="font-bold text-slate-800 text-base">确认永久删除这只动物？</h3>
+      <p class="text-slate-500 text-sm mt-1">
+        「<span x-text="deleteTarget?.nickname" class="font-medium text-slate-700"></span>」
+        将被彻底删除，<span class="text-red-500 font-medium">数据库中不保留记录</span>
+      </p>
+    </div>
+    <div class="flex gap-3">
+      <button @click="deleteTarget = null"
+              class="flex-1 border border-slate-300 text-slate-600 font-medium py-2 rounded-xl hover:bg-slate-50 transition text-sm">
+        取消
+      </button>
+      <button @click="doDelete()"
+              class="flex-1 bg-red-500 hover:bg-red-600 text-white font-medium py-2 rounded-xl transition text-sm">
+        永久删除
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ Toast 提示 ══════════════════ -->
+<div x-cloak x-show="toast.show"
+     x-transition:enter="transition ease-out duration-200"
+     x-transition:enter-start="opacity-0 translate-y-4"
+     x-transition:enter-end="opacity-100 translate-y-0"
+     x-transition:leave="transition ease-in duration-150"
+     x-transition:leave-start="opacity-100"
+     x-transition:leave-end="opacity-0"
+     :class="toast.type === 'success' ? 'bg-emerald-600' : 'bg-red-500'"
+     class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] text-white text-sm font-medium
+            px-5 py-2.5 rounded-full shadow-lg flex items-center gap-2">
+  <span x-text="toast.type === 'success' ? '✓' : '✗'"></span>
+  <span x-text="toast.msg"></span>
+</div>
+
+
+<!-- ══════════════════ Alpine.js 主逻辑 ══════════════════ -->
+<script>
+function farmApp() {
+  return {
+    animals: [],
+    speciesList: [],
+    summary: null,
+    loading: true,
+    showAddModal: false,
+    submitting: false,
+    deleteTarget: null,
+    sellTarget: null,
+    filter: { species: '', feedStatus: '' },
+    form: { species: '', nickname: '', start_date: '' },
+    formError: { species: '', nickname: '', start_date: '' },
+    toast: { show: false, msg: '', type: 'success' },
+    _toastTimer: null,
+
+    get filteredAnimals() {
+      return this.animals.filter(a => {
+        // 种类筛选
+        if (this.filter.species && a.species !== this.filter.species) return false;
+        // 喂养状态筛选
+        if (this.filter.feedStatus) {
+          const needFeed = a.is_alive && a.feed_needed > 0;
+          if (this.filter.feedStatus === 'need' && !(needFeed && !a.fed_today)) return false;
+          if (this.filter.feedStatus === 'done' && !(needFeed && a.fed_today))  return false;
+          if (this.filter.feedStatus === 'none' && !(a.is_alive && a.feed_needed === 0)) return false;
+        }
+        return true;
+      });
+    },
+
+    get todayStr() {
+      return new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+    },
+
+    async init() {
+      await Promise.all([this.loadSpecies(), this.loadAnimals(), this.loadSummary()]);
+      // 设置默认日期为今天
+      this.form.start_date = new Date().toISOString().slice(0, 10);
+    },
+
+    async loadSpecies() {
+      const res = await fetch('/api/species');
+      this.speciesList = await res.json();
+    },
+
+    async loadAnimals() {
+      this.loading = true;
+      try {
+        const res = await fetch('/api/animals');
+        const data = await res.json();
+        // 初始化 _feeding，让 Alpine 响应式系统纳入追踪
+        this.animals = data.map(a => ({ ...a, _feeding: false }));
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async loadSummary() {
+      const res = await fetch('/api/today/summary');
+      this.summary = await res.json();
+    },
+
+    async feedAnimal(animal) {
+      animal._feeding = true;
+      try {
+        const res = await fetch(`/api/animals/${animal.id}/feed`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        if (!res.ok) throw new Error();
+        await this.loadAnimals();
+        await this.loadSummary();
+        this.showToast(`${animal.nickname} 喂养成功！`, 'success');
+      } catch {
+        this.showToast('喂养失败，请重试', 'error');
+        animal._feeding = false;
+      }
+    },
+
+    async unfeedAnimal(animal) {
+      const res = await fetch(`/api/animals/${animal.id}/feed`, { method: 'DELETE' });
+      if (res.ok) {
+        await this.loadAnimals();
+        await this.loadSummary();
+        this.showToast(`已撤销 ${animal.nickname} 的喂养记录`, 'success');
+      }
+    },
+
+    confirmSell(animal) {
+      this.sellTarget = animal;
+    },
+
+    async doSell() {
+      if (!this.sellTarget) return;
+      const name = this.sellTarget.nickname;
+      const res = await fetch(`/api/animals/${this.sellTarget.id}/sell`, { method: 'POST' });
+      if (res.ok) {
+        this.sellTarget = null;
+        await this.loadAnimals();
+        await this.loadSummary();
+        this.showToast(`${name} 已售出 💰`, 'success');
+      } else {
+        this.showToast('售出操作失败，请重试', 'error');
+      }
+    },
+
+    confirmDelete(animal) {
+      this.deleteTarget = animal;
+    },
+
+    async doDelete() {
+      if (!this.deleteTarget) return;
+      const name = this.deleteTarget.nickname;
+      const res = await fetch(`/api/animals/${this.deleteTarget.id}`, { method: 'DELETE' });
+      if (res.ok) {
+        this.deleteTarget = null;
+        await this.loadAnimals();
+        await this.loadSummary();
+        this.showToast(`${name} 已永久删除`, 'success');
+      }
+    },
+
+    validateForm() {
+      this.formError = { species: '', start_date: '' };
+      let ok = true;
+      if (!this.form.species) { this.formError.species = '请选择动物种类'; ok = false; }
+      if (!this.form.start_date) { this.formError.start_date = '请选择开始日期'; ok = false; }
+      return ok;
+    },
+
+    async submitAdd() {
+      if (!this.validateForm()) return;
+      this.submitting = true;
+      try {
+        const res = await fetch('/api/animals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.form)
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          this.showToast(err.detail || '添加失败', 'error');
+          return;
+        }
+        this.showAddModal = false;
+        this.form = { species: '', nickname: '', start_date: new Date().toISOString().slice(0, 10) };
+        await this.loadAnimals();
+        await this.loadSummary();
+        this.showToast('添加成功！', 'success');
+      } catch {
+        this.showToast('网络错误，请重试', 'error');
+      } finally {
+        this.submitting = false;
+      }
+    },
+
+    showToast(msg, type = 'success') {
+      clearTimeout(this._toastTimer);
+      this.toast = { show: true, msg, type };
+      this._toastTimer = setTimeout(() => { this.toast.show = false; }, 2800);
+    },
+  };
+}
+</script>
+</body>
+</html>
