@@ -15,6 +15,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="梦幻西游牧场助手", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "app/static")), name="static")
 app.include_router(router)
 
 
@@ -25,4 +26,4 @@ async def index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)

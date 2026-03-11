@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>梦幻西游 · 牧场助手</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="/static/js/tailwind.min.js"></script>
+  <script defer src="/static/js/alpine.min.js"></script>
   <style>
     [x-cloak] { display: none !important; }
 
@@ -561,10 +561,14 @@ function farmApp() {
       return new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
     },
 
+    localDateStr() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    },
+
     async init() {
       await Promise.all([this.loadSpecies(), this.loadAnimals(), this.loadSummary()]);
-      // 设置默认日期为今天
-      this.form.start_date = new Date().toISOString().slice(0, 10);
+      this.form.start_date = this.localDateStr();
     },
 
     async loadSpecies() {
@@ -673,7 +677,7 @@ function farmApp() {
           return;
         }
         this.showAddModal = false;
-        this.form = { species: '', nickname: '', start_date: new Date().toISOString().slice(0, 10) };
+        this.form = { species: '', nickname: '', start_date: this.localDateStr() };
         await this.loadAnimals();
         await this.loadSummary();
         this.showToast('添加成功！', 'success');
