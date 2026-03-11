@@ -4,8 +4,16 @@ services:
     container_name: farm-helper
     ports:
       - "127.0.0.1:8000:8000"
-    volumes:
-      - ./data:/app/data
     environment:
-      - DB_PATH=/app/data/farm.db
+      - DB_HOST=private-mysql
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=123321
+      - DB_NAME=farm
     restart: unless-stopped
+    networks:
+      - farm-net
+
+networks:
+  farm-net:
+    external: true

@@ -1,7 +1,7 @@
 from datetime import date, datetime
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-import aiosqlite
+import aiomysql
 
 from .database import get_db
 
@@ -9,6 +9,8 @@ router = APIRouter(prefix="/api")
 
 
 # ── 请求模型 ───────────────────────────────────────────────────────────────────
+
+from pydantic import BaseModel
 
 class AnimalCreate(BaseModel):
     nickname: str = ""
@@ -22,21 +24,23 @@ class FeedRequest(BaseModel):
 
 # ── DB 工具函数 ────────────────────────────────────────────────────────────────
 
-async def _get_species_cfg(db: aiosqlite.Connection, species_key: str) -> dict | None:
+async def _get_species_cfg(db: Any, species_key: str) -> dict | None:
     """从 DB 读取物种基本信息"""
-    async with db.execute("SELECT * FROM species WHERE key = ?", (species_key,)) as cur:
+    async with db.cursor() as cur:
+        await cur.execute("SELECT * FROM species WHERE `key` = %s", (species_key,))
         row = await cur.fetchone()
-    return dict(row) if row else None
+    return row
 
 
-async def _get_schedule_row(db: aiosqlite.Connection, species_key: str, day: int) -> dict | None:
+async def _get_schedule_row(db: Any, species_key: str, day: int) -> dict | None:
     """从 DB 读取指定物种指定天的喂养计划"""
-    async with db.execute(
-        "SELECT * FROM feeding_schedule WHERE species_key = ? AND day = ?",
-        (species_key, day)
-    ) as cur:
+    async with db.cursor() as cur:
+        await cur.execute(
+            "SELECT * FROM feeding_schedule WHERE species_key = %s AND day = %s",
+            (species_key, day)
+        )
         row = await cur.fetchone()
-    return dict(row) if row else None
+    return row
 
 
 def _calc_day(start_date_str: str, target: date | None = None) -> int:
@@ -44,7 +48,7 @@ def _calc_day(start_date_str: str, target: date | None = None) -> int:
     return ((target or date.today()) - start).days + 1
 
 
-async def _build_status(db: aiosqlite.Connection, row: dict, today: date | None = None) -> dict:
+async def _build_status(db: Any, row: dict, today: date | None = None) -> dict:
     """根据动物记录 + DB 计划数据计算今日状态"""
     today = today or date.today()
     cfg = await _get_species_cfg(db, row["species"])
@@ -68,12 +72,15 @@ async def _build_status(db: aiosqlite.Connection, row: dict, today: date | None 
             output      = sched["output"]
         else:
             stage, feed_needed, output = "成年期", 0, 0
-        # 优先使用 DB 中持久化的当前饱食度
         satiety  = row.get("current_satiety") if row.get("current_satiety") is not None \
                    else (sched["satiety_start"] if sched else cfg["initial_satiety"])
         is_alive = True
 
     progress = min(100, round(day / max(total_days, 1) * 100)) if day >= 1 else 0
+
+    created_at = row["created_at"]
+    if isinstance(created_at, datetime):
+        created_at = created_at.strftime("%Y-%m-%d %H:%M:%S")
 
     return {
         "id":           row["id"],
@@ -92,28 +99,29 @@ async def _build_status(db: aiosqlite.Connection, row: dict, today: date | None 
         "output_today": output,
         "is_alive":     is_alive,
         "progress":     progress,
-        "created_at":   row["created_at"],
+        "created_at":   created_at,
     }
 
 
 # ── 接口 ───────────────────────────────────────────────────────────────────────
 
 @router.get("/animals")
-async def list_animals(db: aiosqlite.Connection = Depends(get_db)):
+async def list_animals(db: Any = Depends(get_db)):
     today = date.today()
-    # 只返回未售出的动物
-    async with db.execute(
-        "SELECT * FROM animals WHERE sold_at IS NULL ORDER BY start_date DESC, id DESC"
-    ) as cur:
+    async with db.cursor() as cur:
+        await cur.execute(
+            "SELECT * FROM animals WHERE sold_at IS NULL ORDER BY start_date DESC, id DESC"
+        )
         rows = await cur.fetchall()
 
     result = []
     for row in rows:
-        status = await _build_status(db, dict(row), today)
-        async with db.execute(
-            "SELECT amount FROM feed_logs WHERE animal_id = ? AND feed_date = ?",
-            (row["id"], today.isoformat())
-        ) as cur2:
+        status = await _build_status(db, row, today)
+        async with db.cursor() as cur2:
+            await cur2.execute(
+                "SELECT amount FROM feed_logs WHERE animal_id = %s AND feed_date = %s",
+                (row["id"], today.isoformat())
+            )
             fed = await cur2.fetchone()
         status["fed_today"]  = bool(fed)
         status["fed_amount"] = fed["amount"] if fed else 0
@@ -123,7 +131,7 @@ async def list_animals(db: aiosqlite.Connection = Depends(get_db)):
 
 
 @router.post("/animals")
-async def create_animal(body: AnimalCreate, db: aiosqlite.Connection = Depends(get_db)):
+async def create_animal(body: AnimalCreate, db: Any = Depends(get_db)):
     cfg = await _get_species_cfg(db, body.species)
     if not cfg:
         raise HTTPException(status_code=400, detail="不支持的动物种类")
@@ -132,41 +140,46 @@ async def create_animal(body: AnimalCreate, db: aiosqlite.Connection = Depends(g
     except ValueError:
         raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
 
-    # 昵称为空时自动生成：物种名称 + 开始日期，例如 "熊猫20260310"
+    # 昵称为空时自动生成：物种名称 + 开始日期，例如 "熊猫20260311"
     nickname = body.nickname.strip() or (cfg["name"] + start.strftime("%Y%m%d"))
 
     # 初始饱食度取计划表第1天的 satiety_start
     sched_day1 = await _get_schedule_row(db, body.species, 1)
     init_satiety = sched_day1["satiety_start"] if sched_day1 else cfg["initial_satiety"]
 
-    async with db.execute(
-        "INSERT INTO animals (nickname, species, start_date, current_satiety) VALUES (?, ?, ?, ?)",
-        (nickname, body.species, body.start_date, init_satiety)
-    ) as cur:
+    async with db.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO animals (nickname, species, start_date, current_satiety) VALUES (%s, %s, %s, %s)",
+            (nickname, body.species, body.start_date, init_satiety)
+        )
         new_id = cur.lastrowid
     await db.commit()
 
-    async with db.execute("SELECT * FROM animals WHERE id = ?", (new_id,)) as cur:
+    async with db.cursor() as cur:
+        await cur.execute("SELECT * FROM animals WHERE id = %s", (new_id,))
         row = await cur.fetchone()
-    return await _build_status(db, dict(row))
+    return await _build_status(db, row)
 
 
 @router.delete("/animals/{animal_id}")
-async def delete_animal(animal_id: int, db: aiosqlite.Connection = Depends(get_db)):
-    async with db.execute("SELECT id FROM animals WHERE id = ?", (animal_id,)) as cur:
+async def delete_animal(animal_id: int, db: Any = Depends(get_db)):
+    async with db.cursor() as cur:
+        await cur.execute("SELECT id FROM animals WHERE id = %s", (animal_id,))
         if not await cur.fetchone():
             raise HTTPException(status_code=404, detail="动物不存在")
-    await db.execute("DELETE FROM animals WHERE id = ?", (animal_id,))
+    async with db.cursor() as cur:
+        await cur.execute("DELETE FROM animals WHERE id = %s", (animal_id,))
     await db.commit()
     return {"ok": True}
 
 
 @router.post("/animals/{animal_id}/sell")
-async def sell_animal(animal_id: int, db: aiosqlite.Connection = Depends(get_db)):
+async def sell_animal(animal_id: int, db: Any = Depends(get_db)):
     """逻辑删除：标记为已售出，前端不再展示"""
-    async with db.execute(
-        "SELECT id, sold_at FROM animals WHERE id = ?", (animal_id,)
-    ) as cur:
+    async with db.cursor() as cur:
+        await cur.execute(
+            "SELECT id, sold_at FROM animals WHERE id = %s", (animal_id,)
+        )
         row = await cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="动物不存在")
@@ -174,17 +187,19 @@ async def sell_animal(animal_id: int, db: aiosqlite.Connection = Depends(get_db)
         raise HTTPException(status_code=400, detail="该动物已售出")
 
     sold_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    await db.execute(
-        "UPDATE animals SET sold_at = ? WHERE id = ?",
-        (sold_at, animal_id)
-    )
+    async with db.cursor() as cur:
+        await cur.execute(
+            "UPDATE animals SET sold_at = %s WHERE id = %s",
+            (sold_at, animal_id)
+        )
     await db.commit()
     return {"ok": True, "sold_at": sold_at}
 
 
 @router.post("/animals/{animal_id}/feed")
-async def feed_animal(animal_id: int, body: FeedRequest, db: aiosqlite.Connection = Depends(get_db)):
-    async with db.execute("SELECT * FROM animals WHERE id = ?", (animal_id,)) as cur:
+async def feed_animal(animal_id: int, body: FeedRequest, db: Any = Depends(get_db)):
+    async with db.cursor() as cur:
+        await cur.execute("SELECT * FROM animals WHERE id = %s", (animal_id,))
         row = await cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="动物不存在")
@@ -195,68 +210,72 @@ async def feed_animal(animal_id: int, body: FeedRequest, db: aiosqlite.Connectio
     amount = sched["feed_amount"] if sched else 0
     new_satiety = sched["satiety_end"] if sched else row["current_satiety"]
 
-    await db.execute(
-        "INSERT OR REPLACE INTO feed_logs (animal_id, feed_date, amount) VALUES (?, ?, ?)",
-        (animal_id, feed_date, amount)
-    )
-    # 持久化喂养后的饱食度
-    await db.execute(
-        "UPDATE animals SET current_satiety = ? WHERE id = ?",
-        (new_satiety, animal_id)
-    )
+    async with db.cursor() as cur:
+        await cur.execute(
+            "REPLACE INTO feed_logs (animal_id, feed_date, amount) VALUES (%s, %s, %s)",
+            (animal_id, feed_date, amount)
+        )
+    async with db.cursor() as cur:
+        await cur.execute(
+            "UPDATE animals SET current_satiety = %s WHERE id = %s",
+            (new_satiety, animal_id)
+        )
     await db.commit()
     return {"ok": True, "amount": amount, "satiety": new_satiety, "feed_date": feed_date}
 
 
 @router.delete("/animals/{animal_id}/feed")
-async def unfeed_animal(animal_id: int, db: aiosqlite.Connection = Depends(get_db)):
+async def unfeed_animal(animal_id: int, db: Any = Depends(get_db)):
     today = date.today().isoformat()
-    async with db.execute("SELECT * FROM animals WHERE id = ?", (animal_id,)) as cur:
+    async with db.cursor() as cur:
+        await cur.execute("SELECT * FROM animals WHERE id = %s", (animal_id,))
         row = await cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="动物不存在")
 
     day = _calc_day(row["start_date"])
     sched = await _get_schedule_row(db, row["species"], day)
-    # 撤销喂养，饱食度回到当天 satiety_start
     prev_satiety = sched["satiety_start"] if sched else row["current_satiety"]
 
-    await db.execute(
-        "DELETE FROM feed_logs WHERE animal_id = ? AND feed_date = ?",
-        (animal_id, today)
-    )
-    await db.execute(
-        "UPDATE animals SET current_satiety = ? WHERE id = ?",
-        (prev_satiety, animal_id)
-    )
+    async with db.cursor() as cur:
+        await cur.execute(
+            "DELETE FROM feed_logs WHERE animal_id = %s AND feed_date = %s",
+            (animal_id, today)
+        )
+    async with db.cursor() as cur:
+        await cur.execute(
+            "UPDATE animals SET current_satiety = %s WHERE id = %s",
+            (prev_satiety, animal_id)
+        )
     await db.commit()
     return {"ok": True, "satiety": prev_satiety}
 
 
 @router.get("/species")
-async def list_species(db: aiosqlite.Connection = Depends(get_db)):
-    async with db.execute("SELECT key, name, emoji FROM species ORDER BY rowid") as cur:
+async def list_species(db: Any = Depends(get_db)):
+    async with db.cursor() as cur:
+        await cur.execute("SELECT `key`, name, emoji FROM species ORDER BY sort_id")
         rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return list(rows)
 
 
 @router.get("/today/summary")
-async def today_summary(db: aiosqlite.Connection = Depends(get_db)):
+async def today_summary(db: Any = Depends(get_db)):
     today = date.today()
-    async with db.execute(
-        "SELECT * FROM animals WHERE sold_at IS NULL"
-    ) as cur:
+    async with db.cursor() as cur:
+        await cur.execute("SELECT * FROM animals WHERE sold_at IS NULL")
         rows = await cur.fetchall()
 
     need_feed, has_output = [], []
     for row in rows:
-        status = await _build_status(db, dict(row), today)
+        status = await _build_status(db, row, today)
         if not status.get("is_alive"):
             continue
-        async with db.execute(
-            "SELECT amount FROM feed_logs WHERE animal_id = ? AND feed_date = ?",
-            (row["id"], today.isoformat())
-        ) as cur2:
+        async with db.cursor() as cur2:
+            await cur2.execute(
+                "SELECT amount FROM feed_logs WHERE animal_id = %s AND feed_date = %s",
+                (row["id"], today.isoformat())
+            )
             fed = await cur2.fetchone()
         if status["feed_needed"] > 0 and not fed:
             need_feed.append(status["nickname"])
