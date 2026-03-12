@@ -58,6 +58,8 @@ async def _build_status(db: Any, row: dict, today: date | None = None) -> dict:
     day = _calc_day(row["start_date"], today)
     total_days = cfg["total_days"] + row["extra_days"]
 
+    fed_today, fed_amount = False, 0
+
     if day < 1:
         stage, feed_needed, output, is_alive = "未开始", 0, 0, False
         satiety = row.get("current_satiety") or cfg["initial_satiety"]
@@ -72,9 +74,23 @@ async def _build_status(db: Any, row: dict, today: date | None = None) -> dict:
             output      = sched["output"]
         else:
             stage, feed_needed, output = "成年期", 0, 0
-        satiety  = row.get("current_satiety") if row.get("current_satiety") is not None \
-                   else (sched["satiety_start"] if sched else cfg["initial_satiety"])
+
+        # 根据今天是否已喂养决定显示饱食度：
+        # 未喂 → 计划表当天 satiety_start（已含2天自然衰减）
+        # 已喂 → 计划表当天 satiety_end
+        async with db.cursor() as cur:
+            await cur.execute(
+                "SELECT amount FROM feed_logs WHERE animal_id = %s AND feed_date = %s",
+                (row["id"], today.isoformat())
+            )
+            fed_row = await cur.fetchone()
+        if fed_row:
+            satiety = sched["satiety_end"] if sched else row.get("current_satiety")
+        else:
+            satiety = sched["satiety_start"] if sched else (row.get("current_satiety") or cfg["initial_satiety"])
         is_alive = True
+        fed_today = bool(fed_row)
+        fed_amount = fed_row["amount"] if fed_row else 0
 
     progress = min(100, round(day / max(total_days, 1) * 100)) if day >= 1 else 0
 
@@ -100,6 +116,8 @@ async def _build_status(db: Any, row: dict, today: date | None = None) -> dict:
         "is_alive":     is_alive,
         "progress":     progress,
         "created_at":   created_at,
+        "fed_today":    fed_today if is_alive else False,
+        "fed_amount":   fed_amount if is_alive else 0,
     }
 
 
@@ -117,14 +135,6 @@ async def list_animals(db: Any = Depends(get_db)):
     result = []
     for row in rows:
         status = await _build_status(db, row, today)
-        async with db.cursor() as cur2:
-            await cur2.execute(
-                "SELECT amount FROM feed_logs WHERE animal_id = %s AND feed_date = %s",
-                (row["id"], today.isoformat())
-            )
-            fed = await cur2.fetchone()
-        status["fed_today"]  = bool(fed)
-        status["fed_amount"] = fed["amount"] if fed else 0
         result.append(status)
 
     return result
@@ -271,13 +281,7 @@ async def today_summary(db: Any = Depends(get_db)):
         status = await _build_status(db, row, today)
         if not status.get("is_alive"):
             continue
-        async with db.cursor() as cur2:
-            await cur2.execute(
-                "SELECT amount FROM feed_logs WHERE animal_id = %s AND feed_date = %s",
-                (row["id"], today.isoformat())
-            )
-            fed = await cur2.fetchone()
-        if status["feed_needed"] > 0 and not fed:
+        if status["feed_needed"] > 0 and not status["fed_today"]:
             need_feed.append(status["nickname"])
         if status["output_today"] > 0:
             has_output.append({"nickname": status["nickname"], "output": status["output_today"]})
