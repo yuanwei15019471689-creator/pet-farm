@@ -18,7 +18,7 @@ async def init_db():
         password=os.environ.get("DB_PASSWORD", ""),
         db=os.environ.get("DB_NAME", "farm"),
         charset="utf8mb4",
-        autocommit=False,
+        autocommit=True,
         cursorclass=aiomysql.DictCursor,
     )
     async with _pool.acquire() as conn:
